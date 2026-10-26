@@ -33,9 +33,28 @@ if sys.platform == "win32":
     import asyncio
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
-from agent import app as langgraph_app, extract_text, selection_wait_node
+from agent import app as langgraph_app, extract_text, selection_wait_node, get_stagehand
 
-app = FastAPI(title="TruthPhone API")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(_app):
+    # Warm up Chrome + Stagehand in the background so the first demo search
+    # starts instantly instead of waiting for the browser to launch.
+    async def _warm():
+        try:
+            await get_stagehand()
+        except Exception as e:
+            print(f"[warmup] Stagehand not ready yet: {e}")
+    try:
+        asyncio.create_task(_warm())
+    except Exception:
+        pass
+    yield
+
+
+app = FastAPI(title="TruthPhone API", lifespan=lifespan)
 
 
 def make_fresh_state():
@@ -503,7 +522,6 @@ async def reset_endpoint():
 
 if __name__ == "__main__":
     import sys
-    if sys.platform == "win32":
-        import asyncio
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # NOTE: reload=True makes uvicorn force a SelectorEventLoop on Windows, which
+    # cannot spawn subprocesses. Stagehand needs to launch Chrome, so reload is off.
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)

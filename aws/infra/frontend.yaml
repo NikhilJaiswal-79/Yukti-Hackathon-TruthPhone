@@ -1,0 +1,156 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  TruthPhone frontend hosting: private S3 bucket behind CloudFront with
+  Origin Access Control, plus a same-origin /api/* proxy to the Lambda
+  Function URL. Upload frontend/dist here after creating the stack.
+
+Parameters:
+  ApiOriginDomain:
+    Type: String
+    Description: >
+      Lambda Function URL hostname only, with no https:// and no trailing
+      slash (for example abc123.lambda-url.ap-south-1.on.aws).
+    AllowedPattern: "^[a-z0-9.-]+$"
+    MinLength: 1
+
+Resources:
+  ApiRewriteFunction:
+    Type: AWS::CloudFront::Function
+    Properties:
+      Name: !Sub "truthphone-api-rewrite-${AWS::AccountId}"
+      AutoPublish: true
+      FunctionConfig:
+        Comment: Strip the /api prefix before forwarding to the Function URL
+        Runtime: cloudfront-js-2.0
+      FunctionCode: |
+        function handler(event) {
+          var request = event.request;
+          if (request.uri === '/api') {
+            request.uri = '/';
+          } else if (request.uri.indexOf('/api/') === 0) {
+            request.uri = request.uri.substring(4);
+          }
+          return request;
+        }
+
+  UiBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+
+  UiOriginAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "truthphone-ui-oac-${AWS::AccountId}-${AWS::Region}"
+        Description: OAC for the TruthPhone UI bucket
+        OriginAccessControlOriginType: s3
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  UiDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: TruthPhone UI
+        DefaultRootObject: index.html
+        PriceClass: PriceClass_200
+        HttpVersion: http2
+        IPV6Enabled: true
+        Origins:
+          - Id: ui-s3-origin
+            DomainName: !GetAtt UiBucket.RegionalDomainName
+            OriginAccessControlId: !Ref UiOriginAccessControl
+            S3OriginConfig:
+              OriginAccessIdentity: ""
+          - Id: api-lambda-origin
+            DomainName: !Ref ApiOriginDomain
+            CustomOriginConfig:
+              HTTPPort: 80
+              HTTPSPort: 443
+              OriginProtocolPolicy: https-only
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+        CacheBehaviors:
+          - PathPattern: /api/*
+            TargetOriginId: api-lambda-origin
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+              - PUT
+              - POST
+              - PATCH
+              - DELETE
+            CachedMethods:
+              - GET
+              - HEAD
+              - OPTIONS
+            Compress: true
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+            OriginRequestPolicyId: b689b0a8-53d0-40ab-baf2-68738e2966ac
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt ApiRewriteFunction.FunctionARN
+        DefaultCacheBehavior:
+          TargetOriginId: ui-s3-origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  UiBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref UiBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontRead
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "${UiBucket.Arn}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${UiDistribution}"
+
+Outputs:
+  SiteUrl:
+    Description: Public HTTPS URL for the React UI.
+    Value: !Sub "https://${UiDistribution.DomainName}"
+  ApiBaseUrl:
+    Description: Use as VITE_API_URL when building the React UI.
+    Value: !Sub "https://${UiDistribution.DomainName}/api"
+  UiBucketName:
+    Description: Upload frontend/dist to this bucket.
+    Value: !Ref UiBucket
+  DistributionId:
+    Description: Use with aws cloudfront create-invalidation --paths "/*".
+    Value: !Ref UiDistribution

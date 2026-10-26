@@ -1,0 +1,149 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  TruthPhone backend: two Lambda functions (API + async browser worker),
+  a DynamoDB session table, and a public Lambda Function URL. No VPC, ALB,
+  ECS, ECR, API Gateway, or Cognito.
+
+Parameters:
+  ApiCodeBucket:
+    Type: String
+    Description: S3 bucket in this region containing api.zip.
+  ApiCodeKey:
+    Type: String
+    Description: S3 key for api.zip.
+  WorkerCodeBucket:
+    Type: String
+    Description: S3 bucket in this region containing worker.zip.
+  WorkerCodeKey:
+    Type: String
+    Description: S3 key for worker.zip.
+  BedrockModelId:
+    Type: String
+    Default: in.anthropic.claude-haiku-4-5-20251001-v1:0
+    Description: On-demand Bedrock model or inference profile used by Strands agents.
+  BrowserSessionTimeout:
+    Type: Number
+    Default: 600
+    MinValue: 60
+    MaxValue: 900
+    Description: AgentCore Browser session TTL in seconds. The worker stops it sooner.
+  AllowedOrigins:
+    Type: String
+    Default: "*"
+    Description: Comma-separated CORS origins. "*" is fine for a public demo.
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Architectures:
+      - x86_64
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        SESSION_TABLE: !Ref SessionsTable
+        BEDROCK_MODEL_ID: !Ref BedrockModelId
+        BROWSER_SESSION_TIMEOUT: !Ref BrowserSessionTimeout
+        ALLOWED_ORIGINS: !Ref AllowedOrigins
+        MAX_PHONES: "2"
+        MAX_CLAIMS: "3"
+        LOG_LEVEL: INFO
+
+Resources:
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: sessionId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: sessionId
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: expiresAt
+        Enabled: true
+      SSESpecification:
+        SSEEnabled: true
+      DeletionProtectionEnabled: false
+
+  WorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "truthphone-worker-${AWS::StackName}"
+      CodeUri:
+        Bucket: !Ref WorkerCodeBucket
+        Key: !Ref WorkerCodeKey
+      Handler: worker_handler.handler
+      Timeout: 900
+      MemorySize: 2048
+      EventInvokeConfig:
+        MaximumRetryAttempts: 0
+        MaximumEventAgeInSeconds: 900
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - Statement:
+            - Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+                - bedrock:InvokeModelWithResponseStream
+                - bedrock:Converse
+                - bedrock:ConverseStream
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - bedrock-agentcore:StartBrowserSession
+                - bedrock-agentcore:StopBrowserSession
+                - bedrock-agentcore:GetBrowserSession
+                - bedrock-agentcore:ListBrowserSessions
+                - bedrock-agentcore:UpdateBrowserStream
+                - bedrock-agentcore:ConnectBrowserAutomationStream
+                - bedrock-agentcore:ConnectBrowserLiveViewStream
+              # The default browser is AWS-owned, so its ARN uses account "aws"
+              # (for example arn:aws:bedrock-agentcore:ap-south-1:aws:browser/aws.browser.v1).
+              Resource: !Sub "arn:aws:bedrock-agentcore:${AWS::Region}:aws:browser/*"
+
+  ApiFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub "truthphone-api-${AWS::StackName}"
+      CodeUri:
+        Bucket: !Ref ApiCodeBucket
+        Key: !Ref ApiCodeKey
+      Handler: api_handler.handler
+      Timeout: 30
+      MemorySize: 512
+      Environment:
+        Variables:
+          WORKER_FUNCTION_NAME: !Ref WorkerFunction
+      FunctionUrlConfig:
+        AuthType: NONE
+        Cors:
+          AllowCredentials: false
+          AllowHeaders:
+            - content-type
+          AllowMethods:
+            - GET
+            - POST
+            - DELETE
+          AllowOrigins:
+            - "*"
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref SessionsTable
+        - LambdaInvokePolicy:
+            FunctionName: !Ref WorkerFunction
+
+Outputs:
+  ApiUrl:
+    Description: Public base URL for the API. Set VITE_API_URL to this (no trailing slash).
+    Value: !GetAtt ApiFunctionUrl.FunctionUrl
+  SessionTableName:
+    Description: DynamoDB table used by both Lambda functions.
+    Value: !Ref SessionsTable
+  WorkerFunctionName:
+    Value: !Ref WorkerFunction
+  ApiFunctionName:
+    Value: !Ref ApiFunction

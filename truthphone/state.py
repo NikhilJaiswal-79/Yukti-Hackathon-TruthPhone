@@ -8,6 +8,7 @@ class PhoneCandidate(BaseModel):
     price: str = Field(description="Price of the phone")
     specs: str = Field(description="Key specifications")
     url: str = Field(description="URL to the listing")
+    details: str = Field(default="", description="Full details scraped from the product page")
 
 class VerificationClaim(BaseModel):
     claim: str = Field(description="The specific claim to verify (e.g. '8GB RAM')")

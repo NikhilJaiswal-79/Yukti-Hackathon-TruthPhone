@@ -1,0 +1,5 @@
+node_modules/
+dist/
+public/nice-dcv-web-client-sdk/
+.vite/
+*.local

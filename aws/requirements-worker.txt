@@ -1,0 +1,5 @@
+strands-agents==1.1.0
+bedrock-agentcore==1.25.0
+playwright==1.64.1
+boto3==1.43.118
+botocore==1.43.118
