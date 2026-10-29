@@ -21,7 +21,12 @@ Parameters:
   BedrockModelId:
     Type: String
     Default: in.anthropic.claude-haiku-4-5-20251001-v1:0
-    Description: On-demand Bedrock model or inference profile used by Strands agents.
+    Description: Cheap Bedrock model used for chat and clarification.
+  VerifyModelId:
+    Type: String
+    Default: global.anthropic.claude-sonnet-4-6
+    Description: Strong Bedrock model used to extract, judge and report claims.
+      Sonnet 5.x needs model access enabled first.
   BrowserSessionTimeout:
     Type: Number
     Default: 600
@@ -44,10 +49,11 @@ Globals:
       Variables:
         SESSION_TABLE: !Ref SessionsTable
         BEDROCK_MODEL_ID: !Ref BedrockModelId
+        VERIFY_MODEL_ID: !Ref VerifyModelId
         BROWSER_SESSION_TIMEOUT: !Ref BrowserSessionTimeout
         ALLOWED_ORIGINS: !Ref AllowedOrigins
         MAX_PHONES: "2"
-        MAX_CLAIMS: "3"
+        MAX_CLAIMS: "12"
         LOG_LEVEL: INFO
 
 Resources:

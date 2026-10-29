@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import time
+from decimal import Decimal
 from typing import Any, Dict, Optional
 
 import boto3
@@ -34,7 +35,11 @@ def table():
 
 
 def _clean(value: Any) -> Any:
-    """Convert Pydantic models to dicts and remove all None values."""
+    """Convert Pydantic models to dicts, drop None values and fix floats.
+
+    DynamoDB rejects Python floats, so any float (for example a judge
+    confidence score) is stored as a Decimal.
+    """
     if isinstance(value, BaseModel):
         value = value.model_dump()
     if isinstance(value, dict):
@@ -45,6 +50,8 @@ def _clean(value: Any) -> Any:
         }
     if isinstance(value, (list, tuple)):
         return [_clean(item) for item in value]
+    if isinstance(value, float):
+        return Decimal(str(value))
     return value
 
 

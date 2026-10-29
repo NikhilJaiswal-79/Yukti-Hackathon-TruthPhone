@@ -1,89 +1,83 @@
-# HackFusion 2026 - TruthPhone 📱🔍
+# TruthPhone on AWS — Real-Time Shopping & Fact-Checking Multi-Agent Platform
 
-**TruthPhone** is an AI-powered multi-agent shopping and verification platform built for **HackFusion 2026**. It combines interactive recommendation with real-time web verification to help users find the best smartphone and verify e-commerce listing claims before purchasing.
-
----
-
-## 🌟 Key Features
-
-- 💬 **Interactive Guided Buying**: Multi-step conversation agent to understand user requirements (budget, brand, features, usage).
-- 🌐 **Real-time Web Searching & Extraction**: Uses `browser-use` to search Amazon and Flipkart for actual phone listings.
-- 🔬 **Automated Claim Verification**: Extracts key marketing specs and fact-checks them against third-party reviews and official specs using automated web search.
-- 🚨 **Risk & Red Flag Synthesis**: Summarizes trade-offs, potential dealbreakers, and verification confidence scores.
-- ⚡ **Groq LLM Acceleration**: Powered by high-speed inference on Groq using `openai/gpt-oss-20b`.
+🌐 **Live Deployed Application:** [https://d1e35mjxk5wi14.cloudfront.net](https://d1e35mjxk5wi14.cloudfront.net)  
+⚡ **Region:** `ap-south-1` (Mumbai)
 
 ---
 
-## 🏗 Project Structure
+## 🌟 Overview
+
+**TruthPhone** is an AWS-native, multi-agent smartphone shopping and verification platform built on **Amazon Bedrock**, **AgentCore Browser**, and **AWS Lambda**.
+
+It combines interactive recommendation with real-time web verification to help users discover smartphones and rigorously fact-check e-commerce listing claims before purchasing.
+
+- 💬 **Interactive Guided Buying**: Clarifies requirements (budget, brand, use-case).
+- 🌐 **Live Real-time Web Scraping**: Live Chrome browser on Amazon Bedrock AgentCore Browser streamed into the React UI with interactive DCV.
+- 🔬 **Automated Claim Verification**: Fact-checks specs, battery claims, and features against live independent benchmarks and user opinions from **GSMArena**.
+- 🚨 **Risk & Red Flag Synthesis**: Summarizes trade-offs, potential dealbreakers, and confidence scores.
+
+---
+
+## 🏗 Architecture
 
 ```
-hackfusion/
-├── truthphone/
-│   ├── main.py          # FastAPI application server & HTML UI
-│   ├── agent.py         # LangGraph workflow & multi-agent definitions
-│   ├── state.py         # Pydantic & LangGraph state models
-│   └── README.md        # TruthPhone documentation
-├── .gitignore
-└── README.md
+React UI (S3 + CloudFront)
+   │  fetch /api/* (same origin)
+   ▼
+CloudFront ── /api/* proxy ──► API Lambda (FastAPI + Mangum) ── async invoke ──► Worker Lambda
+   │                                              │ Bedrock Claude Haiku 4.5
+   ▼                                              │ Playwright over CDP
+DynamoDB session ◄──── live-view URL ─────────────┤
+                                                  ▼
+                                     AgentCore Browser (real Chrome)
+                               Amazon.in → Flipkart → DuckDuckGo / GSMArena
+```
+
+- **Frontend**: React 18 + TypeScript + Vite hosted on private S3 behind Amazon CloudFront with Origin Access Control.
+- **Compute**: API Lambda (Function URL) + Async Worker Lambda (900s timeout, 2GB RAM).
+- **LLM Intelligence**: Claude Haiku 4.5 via the `in.anthropic.claude-haiku-4-5-20251001-v1:0` inference profile in `ap-south-1`.
+- **State Store**: DynamoDB session table (`truthphone-sessions`) with automatic TTL.
+
+---
+
+## 📂 Project Structure
+
+```
+.
+├── ARTICLE.md                  # Hackathon article and design backstory
+├── README.md                   # Project overview & architecture
+└── aws/
+    ├── backend/
+    │   ├── api_handler.py      # Mangum API Lambda entrypoint
+    │   ├── worker_handler.py   # Async worker Lambda entrypoint
+    │   └── truthphone/
+    │       ├── agents.py       # Bedrock agents & fact-checking prompts
+    │       ├── amazon.py       # Amazon scraper & Flipkart/web fallback
+    │       ├── api.py          # FastAPI routes
+    │       ├── browser.py      # AgentCore Browser & Playwright CDP
+    │       ├── config.py       # Configuration & environment loader
+    │       ├── models.py       # Pydantic state models
+    │       ├── store.py        # DynamoDB session store
+    │       └── worker.py       # Multi-agent orchestrator & GSMArena reviews
+    ├── frontend/               # React + TypeScript + DCV Live Browser UI
+    ├── infra/
+    │   ├── backend.yaml        # CloudFormation / SAM backend template
+    │   └── frontend.yaml       # CloudFormation S3 + CloudFront template
+    ├── scripts/
+    │   ├── build_lambda.py     # Cross-compiles Linux wheels and builds zips
+    │   ├── clean.ps1           # Deletes build outputs, node_modules, caches
+    │   ├── package.ps1         # Packaging script
+    │   └── run_local.ps1       # Local runner against AWS Bedrock
+    ├── requirements-api.txt
+    ├── requirements-worker.txt
+    └── DEPLOY.md               # AWS deployment guide
 ```
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Deployment Guide
 
-### 1. Prerequisites
-- Python 3.10+
-- Google Chrome installed
-
-### 2. Environment Setup
-```bash
-# Navigate to truthphone
-cd truthphone
-
-# Create virtual environment
-python -m venv venv
-
-# Activate virtual environment
-# Windows (PowerShell):
-.\venv\Scripts\Activate.ps1
-# Mac/Linux:
-source venv/bin/activate
-
-# Install dependencies
-pip install langgraph langchain-core langchain-groq browser-use playwright fastapi uvicorn pydantic
-playwright install
-```
-
-### 3. API Key Configuration
-Set your Groq API key:
-```bash
-# Windows PowerShell:
-$env:GROQ_API_KEY="gsk_your_groq_api_key"
-
-# Linux/macOS:
-export GROQ_API_KEY="gsk_your_groq_api_key"
-```
-
-### 4. Run the Application
-```bash
-python main.py
-```
-
-Open your browser and navigate to `http://localhost:8000`.
-
----
-
-## 🤖 Agent Architecture
-
-TruthPhone uses a 7-agent architecture orchestrated via **LangGraph**:
-
-1. **Conversation / Clarification Agent**: Engages user and extracts search constraints.
-2. **Search / Browser-Use Agent**: Dynamically navigates e-commerce sites to find matching products.
-3. **Comparison & Summarizer Agent**: Evaluates options and selects top candidates.
-4. **Verification Planner**: Extracts testable product claims (OIS, battery, processor, display).
-5. **Verifier Agent**: Automates browser checks across review sites and benchmarks.
-6. **Critic / Risk Synthesis Agent**: Evaluates accuracy and flags deceptive marketing.
-7. **Finalizer Agent**: Compiles clear, actionable purchasing advice.
+Detailed deployment instructions for CloudFormation, S3, and CloudFront can be found in [aws/DEPLOY.md](file:///e:/truthphone%20for%20aws-antigravity/aws/DEPLOY.md).
 
 ---
 

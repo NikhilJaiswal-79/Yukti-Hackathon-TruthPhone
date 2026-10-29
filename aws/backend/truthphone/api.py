@@ -10,6 +10,8 @@ import asyncio
 import json
 import logging
 import re
+import sys
+import threading
 import time
 import uuid
 from typing import Any, Dict, List
@@ -73,18 +75,21 @@ def _lambda():
     return _lambda_client
 
 
-def _log_task_error(task: asyncio.Task) -> None:
+def _run_local_job(payload: Dict[str, Any]) -> None:
+    """Run one worker job on a dedicated event loop (local development only).
+
+    On Windows, `uvicorn --reload` forces the SelectorEventLoop, which cannot
+    spawn subprocesses. Playwright launches its driver as a subprocess, so
+    sharing uvicorn's loop fails with NotImplementedError. A thread with its own
+    Proactor loop keeps `--reload` working and lets Playwright start.
+    """
+    from .worker import run_job
+
+    policy = getattr(asyncio, "WindowsProactorEventLoopPolicy", None)
+    if sys.platform == "win32" and policy is not None:
+        asyncio.set_event_loop_policy(policy())
     try:
-        task.result()
-    except Exception:
-        logger.exception("Local worker task failed")
-
-
-def _invoke_worker(payload: Dict[str, Any]) -> None:
-    if LOCAL_WORKER:
-        from .worker import run_job
-
-        task = asyncio.create_task(
+        asyncio.run(
             run_job(
                 session_id=payload["sessionId"],
                 action=payload["action"],
@@ -92,7 +97,15 @@ def _invoke_worker(payload: Dict[str, Any]) -> None:
                 index=payload.get("index"),
             )
         )
-        task.add_done_callback(_log_task_error)
+    except Exception:
+        logger.exception("Local worker job failed")
+
+
+def _invoke_worker(payload: Dict[str, Any]) -> None:
+    if LOCAL_WORKER:
+        threading.Thread(
+            target=_run_local_job, args=(payload,), daemon=True
+        ).start()
         return
 
     if not WORKER_FUNCTION_NAME:

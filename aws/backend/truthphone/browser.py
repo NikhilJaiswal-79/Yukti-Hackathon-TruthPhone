@@ -11,7 +11,7 @@ import logging
 import re
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
+from typing import AsyncIterator, Optional
 
 from bedrock_agentcore.tools.browser_client import BrowserClient
 from playwright.async_api import async_playwright
@@ -130,9 +130,29 @@ async def open_browser(
 
         ws_url, headers = await asyncio.to_thread(client.generate_ws_headers)
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.connect_over_cdp(
-                ws_url, headers=headers
-            )
+            # The AgentCore stream endpoint occasionally answers from an edge
+            # node with a certificate for another host. One retry is usually
+            # enough; without it a single bad node kills the whole job.
+            browser = None
+            last_error: Optional[Exception] = None
+            for attempt in range(3):
+                try:
+                    browser = await playwright.chromium.connect_over_cdp(
+                        ws_url, headers=headers
+                    )
+                    break
+                except Exception as exc:  # noqa: BLE001 - retry any connect failure
+                    last_error = exc
+                    logger.warning(
+                        "CDP connect attempt %s failed: %s", attempt + 1, exc
+                    )
+                    await asyncio.sleep(2 + attempt * 2)
+                    if attempt < 2:
+                        ws_url, headers = await asyncio.to_thread(
+                            client.generate_ws_headers
+                        )
+            if browser is None:
+                raise last_error or RuntimeError("Could not connect to the browser")
             context = (
                 browser.contexts[0]
                 if browser.contexts

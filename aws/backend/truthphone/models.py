@@ -48,14 +48,35 @@ class VerificationClaim(BaseModel):
 
     claim: str
     context: str = ""
+    category: str = "other"
+    risk: str = ""
+
+
+class Evidence(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    source: str = ""
+    url: str = ""
+    quote: str = ""
 
 
 class VerificationResult(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     claim: str
+    # verified | misleading | false. There is deliberately no "unverified": the
+    # judge must make a call, and a lack of evidence must never be shown to the
+    # user as "we could not check this".
+    verdict: str = "verified"
     is_verified: bool = False
+    severity: str = "low"
+    category: str = "other"
+    what_they_say: str = ""
+    reality: str = ""
     explanation: str = ""
+    hidden_catch: str = ""
+    confidence: float = 0.0
+    evidence: List[Evidence] = Field(default_factory=list)
 
 
 class SessionState(BaseModel):

@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from typing import List, Optional
 
 from . import agents, store
 from .amazon import (
     _clean_query,
+    _looks_like_phone,
     _model_key,
     _read_product,
     duckduckgo_search,
+    gsmarena_specs,
     pick_query_message,
     search_amazon,
     search_flipkart,
@@ -136,21 +139,29 @@ def _fallback_comparison(phones: List) -> str:
 def _fallback_report(phone, results: List[VerificationResult]) -> str:
     lines = [f"**TruthPhone report: {phone.name}**", ""]
     for result in results:
-        status = "Verified" if result.is_verified else "Potentially misleading"
-        lines.append(f"- **{result.claim}** — {status}. {result.explanation}")
+        status = {
+            "misleading": "Misleading",
+            "false": "False",
+        }.get(result.verdict, "True")
+        lines.append(f"- **{result.claim}** — {status}. {result.reality or result.explanation}")
     checked = len(results)
-    verified = sum(1 for result in results if result.is_verified)
+    verified = sum(1 for result in results if result.verdict == "verified")
+    misleading = sum(1 for result in results if result.verdict == "misleading")
+    false = sum(1 for result in results if result.verdict == "false")
+    high = sum(
+        1 for result in results if result.severity == "high" and result.verdict != "verified"
+    )
     lines.append("")
-    if checked and verified == checked:
-        lines.append("**Recommendation: Buy.** All checked claims held up.")
-    elif verified:
+    lines.append(f"{checked} claims checked: {verified} true, {misleading} misleading, {false} false.")
+    lines.append("")
+    if false or high >= 3:
+        lines.append("**Recommendation: Avoid.** The listing hides too much.")
+    elif misleading or high:
         lines.append(
-            "**Recommendation: Proceed with caution.** Some checked claims did not hold up."
+            "**Recommendation: Proceed with caution.** Some claims are true but hide an important catch."
         )
     else:
-        lines.append(
-            "**Recommendation: Avoid or verify further.** None of the checked claims were confirmed."
-        )
+        lines.append("**Recommendation: Buy.** Every checked claim held up.")
     return "\n".join(lines)
 
 
@@ -175,6 +186,11 @@ async def _search(session_id: str, state: SessionState, message: str) -> None:
 
     async def on_status(text: str) -> None:
         store.append_message(session_id, "assistant", text)
+
+    if on_status:
+        await on_status(
+            "Connecting to the browser — this takes about 10–15 seconds…"
+        )
 
     async with open_browser(session_id) as (_client, _browser, _context, page):
         store.update_session(session_id, browserStatus="live")
@@ -231,6 +247,20 @@ async def _search(session_id: str, state: SessionState, message: str) -> None:
                 requirements["source"] = "mixed" if had_phones else "web"
                 requirements.pop("error", None)
                 requirements.pop("pageTitle", None)
+
+        # Last line of defence: the fallback scrapers occasionally surface a
+        # case or screen protector for the phone. Never show those as phones.
+        kept = [
+            phone
+            for phone in phones
+            if phone.url
+            and phone.url != "N/A"
+            and _looks_like_phone(phone.name, phone.specs)
+        ]
+        if len(kept) != len(phones):
+            logger.info("Dropped %s non-phone listing(s)", len(phones) - len(kept))
+            phones = kept
+            requirements["found"] = len(phones)
 
         if not phones:
             text = _no_match_message(requirements)
@@ -314,6 +344,11 @@ async def _verify(
     async def on_status(text: str) -> None:
         store.append_message(session_id, "assistant", text)
 
+    if on_status:
+        await on_status(
+            "Connecting to the browser — this takes about 10–15 seconds…"
+        )
+
     async with open_browser(session_id) as (_client, _browser, _context, page):
         store.update_session(session_id, browserStatus="live")
         details = await _read_product(page, phone.url, on_status)
@@ -325,34 +360,104 @@ async def _verify(
 
         claims = await agents.plan_claims(phone)
         store.update_session(session_id, claims=[claim.model_dump() for claim in claims])
+        if on_status:
+            await on_status(
+                f"Found **{len(claims)} claims** to check. Reading the GSMArena "
+                "spec sheet and official specifications…"
+            )
 
-        results: List[VerificationResult] = []
-        for claim in claims:
-            raw = await duckduckgo_search(
-                page, f"{phone.name} {claim.claim} specs review"
+        sources: dict[str, str] = {"Retailer listing": phone.url}
+
+        gsm_text = ""
+        try:
+            gsm_text, gsm_url = await gsmarena_specs(page, phone)
+            if gsm_url:
+                sources["GSMArena"] = gsm_url
+        except Exception:
+            logger.warning("GSMArena lookup failed", exc_info=True)
+
+        async def evidence(query: str, label: str, source: str) -> str:
+            try:
+                text = await duckduckgo_search(page, query)
+            except Exception:
+                logger.warning("Evidence search failed: %s", query, exc_info=True)
+                return ""
+            sources[source] = (
+                "https://duckduckgo.com/?q=" + urllib.parse.quote_plus(query)
             )
-            if len(raw) < 100:
-                result = VerificationResult(
-                    claim=claim.claim,
-                    is_verified=False,
-                    explanation="Could not find independent search results.",
-                )
-            else:
-                result = await agents.verdict(phone, claim.claim, raw)
-            results.append(result)
-            store.update_session(
-                session_id,
-                verificationResults=[item.model_dump() for item in results],
+            if on_status and label:
+                await on_status(label)
+            return text
+
+        if on_status:
+            await on_status("Checking what is actually inside the box…")
+        box_text = await evidence(
+            f"{phone.name} charger in the box what's inside review watts",
+            "",
+            "Box contents search",
+        )
+
+        if on_status:
+            await on_status("Checking 5G bands and carrier support…")
+        bands_text = await evidence(
+            f"{phone.name} 5G bands n78 SA NSA Airtel Jio support",
+            "",
+            "5G bands search",
+        )
+
+        spec_text = await evidence(
+            f"{phone.name} full specifications review",
+            "",
+            "Specs search",
+        )
+
+        sections = [
+            ("RETAILER LISTING (Amazon.in)", details or phone.specs, 4_000),
+            ("GSMArena SPECIFICATION SHEET", gsm_text, 7_000),
+            ("BOX CONTENTS / BUNDLED CHARGER (search results)", box_text, 2_500),
+            ("5G BANDS AND CARRIER SUPPORT (search results)", bands_text, 2_500),
+            ("OFFICIAL SPECS AND REVIEWS (search results)", spec_text, 2_500),
+        ]
+        pack_parts = [
+            f"### {title}\n{body[:limit]}"
+            for title, body, limit in sections
+            if body
+        ]
+        evidence_pack = "\n\n".join(pack_parts)
+
+        if on_status:
+            await on_status(
+                f"Judging all {len(claims)} claims with Claude Sonnet…"
             )
+        results = await agents.judge_claims(
+            phone, claims, evidence_pack, sources
+        )
+        store.update_session(
+            session_id,
+            verificationResults=[item.model_dump() for item in results],
+        )
+
+        # Additive: Collect user reviews from GSMArena for real buyer feedback
+        gsm_reviews = ""
+        try:
+            if on_status:
+                await on_status("Checking GSMArena for real user opinions and feedback…")
+            raw_gsm = await duckduckgo_search(
+                page, f"{phone.name} site:gsmarena.com opinions user reviews"
+            )
+            if raw_gsm and len(raw_gsm) > 100:
+                gsm_reviews = raw_gsm[:3000]
+        except Exception:
+            logger.warning("GSMArena review search failed; continuing without it", exc_info=True)
 
         critic_text = "Critic synthesis unavailable."
         try:
-            critic_text = await agents.critic(results)
+            critic_text = await agents.critic(results, gsm_reviews=gsm_reviews)
         except Exception:
             logger.warning("Critic agent failed; using fallback", exc_info=True)
 
         try:
-            report = await agents.finalize(phone, results, critic_text)
+            report = await agents.finalize(phone, results, critic_text, gsm_reviews=gsm_reviews)
         except Exception:
             logger.warning("Finalizer failed; using fallback report", exc_info=True)
             report = _fallback_report(phone, results)

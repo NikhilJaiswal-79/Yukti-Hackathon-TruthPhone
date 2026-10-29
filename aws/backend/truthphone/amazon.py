@@ -23,9 +23,15 @@ StatusCallback = Optional[Callable[[str], Awaitable[None]]]
 
 _HARVEST_PRODUCTS_JS = r"""
 (() => {
-  const cards = Array.from(document.querySelectorAll(
+  const all = Array.from(document.querySelectorAll(
     '[data-component-type="s-search-result"], div[data-asin]:not([data-asin=""])'
   ));
+  // Amazon nests small div[data-asin] blocks (brand chips, badges) inside each
+  // result card. Only keep the outermost card per ASIN, otherwise the title we
+  // scrape is just the brand name.
+  const cards = all.filter(
+    (c) => !(c.parentElement && c.parentElement.closest('[data-asin]'))
+  );
   const out = [];
   const seen = new Set();
   for (const c of cards) {
@@ -42,9 +48,11 @@ _HARVEST_PRODUCTS_JS = r"""
 
     const titleEl = c.querySelector('h2') || link;
     const img = c.querySelector('img[alt]');
-    const title = (titleEl.innerText || (img ? img.alt : '') || '')
-      .trim().replace(/\s+/g, ' ');
-    if (!title) continue;
+    let title = (titleEl.innerText || '').trim().replace(/\s+/g, ' ');
+    if (title.length < 12 && img && img.alt) {
+      title = img.alt.trim().replace(/\s+/g, ' ');
+    }
+    if (!title || title.length < 4) continue;
 
     const priceEl =
       c.querySelector('.a-price > span.a-offscreen') ||
@@ -134,6 +142,11 @@ _HARVEST_PRODUCT_PAGE_JS = r"""
     offers: many('#tabular-buybox .tabular-buybox-text, #buybox .tabular-buybox-text'),
     warranty: t('#warranty_feature_div') || t('#sellerProfileTriggerId'),
     description: t('#productDescription').slice(0, 2500),
+    // A+ marketing copy and the legal small print. This is where "8GB + 8GB
+    // virtual RAM" and "charger sold separately" usually hide.
+    aplus: t('#aplus').slice(0, 4000),
+    important: t('#important-information').slice(0, 1500),
+    facts: t('#productFactsDesktopExpander').slice(0, 1500),
     alsoBought: many('#sims-consolidated-1_feature_div .a-carousel-card, #similarities_feature_div h2')
   };
 })()
@@ -203,6 +216,18 @@ def _format_details(harvest: Dict[str, Any]) -> str:
     if description:
         out.append("Description:\n" + str(description)[:1200])
 
+    facts = harvest.get("facts")
+    if facts:
+        out.append("Product facts:\n" + str(facts)[:1200])
+
+    aplus = harvest.get("aplus")
+    if aplus:
+        out.append("Marketing content (A+):\n" + str(aplus)[:1500])
+
+    important = harvest.get("important")
+    if important:
+        out.append("Important information and small print:\n" + str(important)[:1000])
+
     return "\n\n".join(out)
 
 
@@ -217,26 +242,11 @@ def _clean_specs(raw: str) -> str:
 
 def _clean_query(raw: str) -> str:
     query = (raw or "").strip()
-    query = re.sub(
-        r"^\s*(please\s+)?(can you\s+|could you\s+)?"
-        r"(search for|search|find me|find|show me|show|look for|get me|get|"
-        r"i want|i need|i'm looking for|im looking for|looking for)\b[:\s]*",
-        "",
-        query,
-        flags=re.I,
-    ).strip()
-    query = re.sub(
-        r"\b(from\s+(amazon|flipkart)[a-z.]*|on\s+(amazon|flipkart)[a-z.]*|"
-        r"in\s+india|please)\b\s*\.?$",
-        "",
-        query,
-        flags=re.I,
-    ).strip(" .,?!")
-    # Amazon search works better without the budget phrase. Keep the budget in
-    # the filter, not in the query text.
+    # Budget phrase removal runs first so that "between 30k" loses its number
+    # before we strip the word "between".
     query = re.sub(
         r"\b(under|below|less than|lesser than|within|up ?to|upto|max(?:imum)?|"
-        r"budget(?: of)?|around|about|approximately|cheaper than)\s*"
+        r"budget(?: of)?|around|about|approximately|cheaper than|between)\s*"
         r"(?:rs\.?|₹)?\s*\d[\d,]*(?:\.\d+)?\s*(?:k|thousand|lakhs?|lacs?|crore)?\b",
         " ",
         query,
@@ -251,8 +261,49 @@ def _clean_query(raw: str) -> str:
     # A bare 4-7 digit number is almost always a budget (or a model year),
     # not part of the Amazon search phrase.
     query = re.sub(r"(?<![\w.])\d{4,7}(?![\w.])", " ", query)
+    # Strip conversational filler so a full sentence ("then buy me a realme
+    # phone between 30k") collapses to the actual search phrase.
+    filler_patterns = [
+        r"\bthen\b",
+        r"\band\b",
+        r"\balso\b",
+        r"\bplease\b",
+        r"\bcan you\b",
+        r"\bcould you\b",
+        r"\bi want to buy\b",
+        r"\bi want\b",
+        r"\bi need\b",
+        r"\bbuy me\b",
+        r"\bget me\b",
+        r"\bfind me\b",
+        r"\bshow me\b",
+        r"\bsearch for\b",
+        r"\blooking for\b",
+        r"\bbetween\b",
+        r"\bfrom\s+(amazon|flipkart)[a-z.]*\b",
+        r"\bon\s+(amazon|flipkart)[a-z.]*\b",
+        r"\bin\s+india\b",
+        r"\bfor me\b",
+        r"\ba\s+smartphone\b",
+        r"\ba\s+phone\b",
+        r"\ba\s+mobile\b",
+        r"\bmobiles?\b",
+        r"\bsmartphones?\b",
+        r"\bphones?\b",
+    ]
+    for pattern in filler_patterns:
+        query = re.sub(pattern, " ", query, flags=re.I)
     query = re.sub(r"\s+", " ", query).strip(" .,?!")
+    query = re.sub(
+        r"^\s*(please\s+)?(can you\s+|could you\s+)?"
+        r"(search for|search|find me|find|show me|show|look for|get me|get|"
+        r"i want|i need|i'm looking for|im looking for|looking for)\b[:\s]*",
+        "",
+        query,
+        flags=re.I,
+    ).strip()
     query = re.sub(r"^a\s+", "", query, flags=re.I)
+    query = re.sub(r"\s+", " ", query).strip(" .,?!")
     return query
 
 
@@ -415,7 +466,8 @@ _ACCESSORY_RE = re.compile(
     r"power ?bank|earphone|earphones|earbud|earbuds|headphone|headphones|headset|"
     r"strap|mount|skin|sticker|protector|wallet|sleeve|pouch|holder|stand|tripod|"
     r"selfie|ring|pop socket|lens|glass|back cover|flip cover|screen protector|"
-    r"phone cover|holster|armband|lanyard)\b",
+    r"phone cover|holster|armband|lanyard|lcd|touch ?screen|screen combo|"
+    r"display combo|spare|replacement|motherboard|flex cable|back panel|bumper)\b",
     re.I,
 )
 
@@ -435,11 +487,15 @@ def _looks_like_phone(title: str, text: str = "") -> bool:
     return bool(_PHONE_HINT_RE.search(title) or _PHONE_HINT_RE.search(text or ""))
 
 
-def _price_from_text(raw: str) -> str:
-    match = re.search(r"(?:₹|\bRs\.?\s?)\s?[\d,]+", raw or "")
-    if not match:
-        return ""
-    return match.group(0).replace(" ", "").replace("Rs.", "₹").replace("Rs", "₹")
+def _retailer_product_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return (
+        "amazon.in/dp/" in lowered
+        or "amazon.in/gp/product" in lowered
+        or "flipkart.com/" in lowered and "/p/" in lowered
+        or "croma.com/" in lowered and "/p/" in lowered
+        or "reliancedigital.co.in/" in lowered
+    )
 
 
 async def _smooth_scroll(page, delta: int) -> None:
@@ -607,10 +663,12 @@ async def search_amazon(
     try:
         await box.wait_for(state="visible", timeout=20_000)
         await box.click()
+        # fill() sets the value instantly instead of typing key-by-key, which
+        # avoids the 30s timeout on long queries.
         try:
-            await box.press_sequentially(query, delay=45)
-        except AttributeError:
-            await box.type(query, delay=45)
+            await box.fill(query)
+        except Exception:
+            await box.press_sequentially(query, delay=20)
         await box.press("Enter")
         await page.wait_for_load_state("domcontentloaded")
         await page.wait_for_timeout(3500)
@@ -626,12 +684,22 @@ async def search_amazon(
 
     except Exception as exc:
         logger.warning("Amazon search box interaction failed: %s", exc)
-        return [], {
-            "query": query,
-            "budget": budget,
-            "brand": brand,
-            "error": "search_failed",
-        }
+        # Fall back to a direct search URL so we don't lose the whole run.
+        try:
+            await page.goto(
+                "https://www.amazon.in/s?k=" + urllib.parse.quote_plus(query),
+                timeout=60_000,
+                wait_until="domcontentloaded",
+            )
+            await page.wait_for_timeout(3500)
+        except Exception as exc2:
+            logger.warning("Amazon direct search URL also failed: %s", exc2)
+            return [], {
+                "query": query,
+                "budget": budget,
+                "brand": brand,
+                "error": "search_failed",
+            }
 
     if await _amazon_blocked(page):
         logger.warning("Amazon search page showed a 503")
@@ -676,6 +744,10 @@ async def search_amazon(
         await page.wait_for_timeout(2000)
 
     logger.info("Harvested %s product cards", len(harvested))
+    logger.debug(
+        "Harvest titles: %s",
+        [str(item.get("title"))[:80] for item in harvested],
+    )
     diagnostics: Dict[str, Any] = {}
     if not harvested:
         diagnostics = await _page_diagnostics(page)
@@ -689,6 +761,7 @@ async def search_amazon(
     for item in harvested:
         title = item.get("title", "")
         if not _looks_like_phone(title, item.get("text", "")):
+            logger.debug("Rejected accessory/non-phone: %s", title[:90])
             continue
         price_int = _price_to_int(item.get("price")) or _price_to_int(
             _price_from_text(item.get("text", ""))
@@ -704,6 +777,12 @@ async def search_amazon(
             seen_models.add(key)
         item["_price_int"] = price_int
         candidates.append(item)
+        logger.debug(
+            "Candidate: %s | price=%s | url=%s",
+            title[:70],
+            item.get("price"),
+            item.get("url"),
+        )
 
     candidates = candidates[:MAX_PHONES]
     logger.info("Matched %s phone(s)", len(candidates))
@@ -967,6 +1046,7 @@ async def web_search_listings(
 
     items.sort(
         key=lambda item: (
+            0 if _retailer_product_url(item.get("url", "")) else 1,
             0 if _has_price(item) else 1,
             _shop_rank(item.get("url", "")),
         )
@@ -980,6 +1060,13 @@ async def web_search_listings(
         snippet = item.get("snippet", "")
         url = item.get("url", "")
         if not title or not url or _is_search_url(url):
+            continue
+        # Prefer real retailer product pages; skip article/search/category
+        # pages once we already have a retailer result.
+        if (
+            not _retailer_product_url(url)
+            and len(candidates) >= MAX_PHONES
+        ):
             continue
         if not _looks_like_phone(title, snippet):
             continue
@@ -1034,3 +1121,68 @@ async def duckduckgo_search(page, query: str) -> str:
     except Exception as exc:
         logger.warning("DuckDuckGo search failed: %s", exc)
         return ""
+
+
+async def duckduckgo_results(page, query: str) -> List[Dict[str, Any]]:
+    """Return titled search results (url included) for evidence gathering."""
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
+    try:
+        await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1200)
+        results = await page.evaluate(_SEARCH_ENGINE_JS) or []
+        return [item for item in results if item.get("url")]
+    except Exception as exc:
+        logger.warning("DuckDuckGo result lookup failed for %r: %s", query, exc)
+        return []
+
+
+async def read_page_text(
+    page, url: str, max_chars: int = 9_000, selector: str = ""
+) -> str:
+    """Open a page and return its readable text (optionally one section)."""
+    try:
+        await page.goto(url, timeout=60_000, wait_until="domcontentloaded")
+        await page.wait_for_timeout(1500)
+        if selector:
+            text = await page.evaluate(
+                "(sel) => { const el = document.querySelector(sel); "
+                "return el ? el.innerText : ''; }",
+                selector,
+            )
+        else:
+            text = await page.evaluate(
+                "document.body ? document.body.innerText : ''"
+            )
+        return (text or "").strip()[:max_chars]
+    except Exception as exc:
+        logger.warning("Page read failed for %s: %s", url, exc)
+        return ""
+
+
+async def gsmarena_specs(page, phone: PhoneCandidate) -> Tuple[str, str]:
+    """Find and read the GSMArena specification page for a phone.
+
+    Returns (spec text, source url). GSMArena lists the physical RAM, the 5G
+    bands and the charging spec, which is exactly what the retailer listing
+    tends to blur.
+    """
+    results = await duckduckgo_results(page, f"{phone.name} site:gsmarena.com")
+    blocked = ("/opinions", "/reviews", "/news", "/deals", "/compare", "/videos")
+    url = ""
+    for item in results:
+        href = item.get("url") or ""
+        if "gsmarena.com/" not in href:
+            continue
+        if any(token in href for token in blocked):
+            continue
+        url = href
+        break
+
+    if not url:
+        return "", ""
+
+    text = await read_page_text(page, url, 9_000, "#specs-list")
+    if len(text) < 200:
+        text = await read_page_text(page, url, 9_000)
+    logger.info("GSMArena specs for %s: %s chars", phone.name[:40], len(text))
+    return text, url

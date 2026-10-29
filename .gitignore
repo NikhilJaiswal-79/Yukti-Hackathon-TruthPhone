@@ -31,11 +31,18 @@ env/
 .env.local
 aws/.env
 
-# IDEs and Editors
+# IDE / agent tool state (worktrees, sessions)
+.kilo/
 .vscode/
 .idea/
 *.swp
 *.swo
+
+# Python test cache
+.pytest_cache/
+
+# TypeScript build info
+*.tsbuildinfo
 
 # OS
 .DS_Store

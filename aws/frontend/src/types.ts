@@ -25,15 +25,34 @@ export interface PhoneCandidate {
   asin: string
 }
 
+export type Verdict = 'verified' | 'misleading' | 'false'
+export type Severity = 'high' | 'medium' | 'low'
+
 export interface VerificationClaim {
   claim: string
   context: string
+  category?: string
+  risk?: string
+}
+
+export interface Evidence {
+  source: string
+  url: string
+  quote: string
 }
 
 export interface VerificationResult {
   claim: string
+  verdict: Verdict
   is_verified: boolean
+  severity: Severity
+  category: string
+  what_they_say: string
+  reality: string
   explanation: string
+  hidden_catch: string
+  confidence: number
+  evidence: Evidence[]
 }
 
 export interface SessionState {
